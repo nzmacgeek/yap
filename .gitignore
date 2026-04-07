@@ -1,0 +1,13 @@
+# Build artefacts
+build/
+
+# dimsim package artefacts
+pkg/payload/sbin/yap
+pkg/payload/sbin/yap-rotate
+*.dpk
+
+# Editor / IDE artefacts
+.DS_Store
+*.swp
+*.swo
+*~

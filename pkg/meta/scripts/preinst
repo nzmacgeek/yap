@@ -1,0 +1,23 @@
+#!/bin/bash
+# Pre-installation script for yap
+# Called before files are placed.
+set -e
+
+# Create the syslog user/group if they do not exist
+if ! getent group syslog >/dev/null 2>&1; then
+    groupadd -r syslog 2>/dev/null || true
+fi
+
+if ! getent passwd syslog >/dev/null 2>&1; then
+    useradd -r -g syslog -s /sbin/nologin \
+        -d /var/log -c "yap syslog daemon" syslog 2>/dev/null || true
+fi
+
+# Ensure log directory exists
+mkdir -p /var/log
+chmod 0755 /var/log
+
+# Ensure /var/run exists for the PID file
+mkdir -p /var/run
+
+exit 0

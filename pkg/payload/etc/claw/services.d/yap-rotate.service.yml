@@ -1,0 +1,14 @@
+# /etc/claw/services.d/yap-rotate.service.yml
+# yap log rotation — "Time to tidy up the backyard!" - Chilli Heeler
+#
+# yap-rotate is a timer service that runs periodically to rotate
+# /var/log/system.log when it exceeds its configured size or age threshold.
+# It signals yap (via SIGUSR1) to reopen the log file after rotation.
+name: yap-rotate
+description: "Time to tidy up the backyard! — yap log rotation"
+type: timer
+start_cmd: /sbin/yap-rotate
+user: root
+restart: no
+after: yap
+interval: 3600

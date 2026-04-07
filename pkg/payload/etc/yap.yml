@@ -1,0 +1,32 @@
+# /etc/yap.yml
+# yap — BlueyOS syslog daemon configuration
+# "Let me tell you about my day!" - Bluey Heeler
+
+# Output log file
+log_file: /var/log/system.log
+
+# UNIX domain socket path (where local apps send syslog messages)
+socket: /dev/log
+
+# Listen for syslog messages on UDP port 514 (RFC 3164 network syslog)
+# Set to true to accept messages from other hosts on the network.
+listen_udp: false
+udp_port: 514
+
+# Remote syslog forwarding
+# Set enabled to true to forward all received messages to a remote syslog sink.
+forward:
+  enabled: false
+  host: ""
+  port: 514
+
+# Log rotation settings (used by yap-rotate)
+rotation:
+  # Enable log rotation
+  enabled: true
+  # Maximum log file size in bytes before rotation (default: 10 MiB)
+  max_size: 10485760
+  # Maximum log file age in seconds before rotation (default: 7 days)
+  max_age: 604800
+  # Number of rotated log files to retain
+  keep_count: 5
