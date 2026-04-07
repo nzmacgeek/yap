@@ -135,18 +135,28 @@ static int config_load(const char *path, struct rotate_config *cfg)
         }
 
         if (indent == 0) {
-            if (strcmp(key, "log_file") == 0)
+            if (strcmp(key, "log_file") == 0) {
                 strncpy(cfg->log_file, val, sizeof(cfg->log_file) - 1);
+                cfg->log_file[sizeof(cfg->log_file) - 1] = '\0';
+            }
         } else if (indent >= 2 && strcmp(section, "rotation") == 0) {
             if (strcmp(key, "enabled") == 0) {
                 cfg->enabled = (strcmp(val,"true")==0||strcmp(val,"1")==0) ? 1 : 0;
             } else if (strcmp(key, "max_size") == 0) {
-                cfg->max_size = atol(val);
+                char *endp;
+                long v = strtol(val, &endp, 10);
+                if (endp != val && *endp == '\0' && v > 0)
+                    cfg->max_size = v;
             } else if (strcmp(key, "max_age") == 0) {
-                cfg->max_age = atol(val);
+                char *endp;
+                long v = strtol(val, &endp, 10);
+                if (endp != val && *endp == '\0' && v > 0)
+                    cfg->max_age = v;
             } else if (strcmp(key, "keep_count") == 0) {
-                int k = atoi(val);
-                if (k > 0) cfg->keep_count = k;
+                char *endp;
+                long k = strtol(val, &endp, 10);
+                if (endp != val && *endp == '\0' && k > 0)
+                    cfg->keep_count = (int)k;
             }
         }
     }
@@ -274,7 +284,9 @@ static int do_rotate(const struct rotate_config *cfg)
         char prefix[MAX_PATH];
 
         strncpy(dir,  cfg->log_file, sizeof(dir) - 1);
+        dir[sizeof(dir) - 1] = '\0';
         strncpy(base, cfg->log_file, sizeof(base) - 1);
+        base[sizeof(base) - 1] = '\0';
 
         /* Split directory and basename */
         char *slash = strrchr(dir, '/');
@@ -284,6 +296,7 @@ static int do_rotate(const struct rotate_config *cfg)
             basename_ptr = slash + 1;
         } else {
             strncpy(dir, ".", sizeof(dir) - 1);
+            dir[sizeof(dir) - 1] = '\0';
             basename_ptr = base;
         }
 
@@ -311,12 +324,14 @@ static int do_rotate(const struct rotate_config *cfg)
             for (i = 1; i < count; i++) {
                 char tmp[MAX_PATH];
                 strncpy(tmp, entries[i], MAX_PATH - 1);
+                tmp[MAX_PATH - 1] = '\0';
                 j = i - 1;
                 while (j >= 0 && strcmp(entries[j], tmp) > 0) {
                     memcpy(entries[j + 1], entries[j], MAX_PATH);
                     j--;
                 }
                 strncpy(entries[j + 1], tmp, MAX_PATH - 1);
+                entries[j + 1][MAX_PATH - 1] = '\0';
             }
 
             /* Remove oldest files beyond keep_count */

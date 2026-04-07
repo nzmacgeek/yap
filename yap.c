@@ -193,8 +193,10 @@ static void yap_log(const char *fmt, ...)
 static void config_defaults(struct yap_config *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
-    strncpy(cfg->log_file,     YAP_LOGFILE,     sizeof(cfg->log_file) - 1);
-    strncpy(cfg->socket_path,  YAP_SOCKET_PATH, sizeof(cfg->socket_path) - 1);
+    strncpy(cfg->log_file,    YAP_LOGFILE,     sizeof(cfg->log_file) - 1);
+    cfg->log_file[sizeof(cfg->log_file) - 1] = '\0';
+    strncpy(cfg->socket_path, YAP_SOCKET_PATH, sizeof(cfg->socket_path) - 1);
+    cfg->socket_path[sizeof(cfg->socket_path) - 1] = '\0';
     cfg->listen_udp      = 0;
     cfg->udp_port        = YAP_UDP_PORT;
     cfg->forward_enabled = 0;
@@ -274,14 +276,17 @@ static int config_load(const char *path, struct yap_config *cfg)
             /* Root-level key */
             if (strcmp(key, "log_file") == 0) {
                 strncpy(cfg->log_file, val, sizeof(cfg->log_file) - 1);
+                cfg->log_file[sizeof(cfg->log_file) - 1] = '\0';
             } else if (strcmp(key, "socket") == 0) {
                 strncpy(cfg->socket_path, val, sizeof(cfg->socket_path) - 1);
+                cfg->socket_path[sizeof(cfg->socket_path) - 1] = '\0';
             } else if (strcmp(key, "listen_udp") == 0) {
                 cfg->listen_udp = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0) ? 1 : 0;
             } else if (strcmp(key, "udp_port") == 0) {
-                int port = atoi(val);
-                if (port > 0 && port <= 65535)
-                    cfg->udp_port = port;
+                char *endp;
+                long port = strtol(val, &endp, 10);
+                if (endp != val && *endp == '\0' && port > 0 && port <= 65535)
+                    cfg->udp_port = (int)port;
             }
         } else if (indent >= 2) {
             /* Nested key under a section */
@@ -290,10 +295,12 @@ static int config_load(const char *path, struct yap_config *cfg)
                     cfg->forward_enabled = (strcmp(val, "true") == 0 || strcmp(val, "1") == 0) ? 1 : 0;
                 } else if (strcmp(key, "host") == 0) {
                     strncpy(cfg->forward_host, val, sizeof(cfg->forward_host) - 1);
+                    cfg->forward_host[sizeof(cfg->forward_host) - 1] = '\0';
                 } else if (strcmp(key, "port") == 0) {
-                    int port = atoi(val);
-                    if (port > 0 && port <= 65535)
-                        cfg->forward_port = port;
+                    char *endp;
+                    long port = strtol(val, &endp, 10);
+                    if (endp != val && *endp == '\0' && port > 0 && port <= 65535)
+                        cfg->forward_port = (int)port;
                 }
             }
         }
@@ -473,8 +480,10 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
             if (*ts_end == ' ') p = ts_end + 1;
         }
         strncpy(msg->hostname, g_hostname, sizeof(msg->hostname) - 1);
+        msg->hostname[sizeof(msg->hostname) - 1] = '\0';
     } else if (msg->hostname[0] == '\0') {
         strncpy(msg->hostname, g_hostname, sizeof(msg->hostname) - 1);
+        msg->hostname[sizeof(msg->hostname) - 1] = '\0';
     }
 
     /* Try to parse tag[pid]: or tag: */
@@ -496,9 +505,13 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
                     char pid_str[16];
                     size_t pid_len = (size_t)(bracket_close - bracket_open - 1);
                     if (pid_len < sizeof(pid_str)) {
+                        char *endp;
+                        long parsed_pid;
                         memcpy(pid_str, bracket_open + 1, pid_len);
                         pid_str[pid_len] = '\0';
-                        msg->pid = atoi(pid_str);
+                        parsed_pid = strtol(pid_str, &endp, 10);
+                        if (endp != pid_str && *endp == '\0' && parsed_pid > 0)
+                            msg->pid = (int)parsed_pid;
                     }
                 }
                 p = colon + 1;
@@ -515,6 +528,7 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
             }
         } else if (msg->tag[0] == '\0') {
             strncpy(msg->tag, "unknown", sizeof(msg->tag) - 1);
+            msg->tag[sizeof(msg->tag) - 1] = '\0';
         }
     }
 
@@ -673,7 +687,7 @@ static void forward_message(const struct syslog_msg *msg, const char *raw, size_
     /* Try inet_pton first, fall back to gethostbyname */
     if (inet_pton(AF_INET, g_cfg.forward_host, &dest.sin_addr) != 1) {
         he = gethostbyname(g_cfg.forward_host);
-        if (!he)
+        if (!he || !he->h_addr_list || !he->h_addr_list[0])
             return;
         memcpy(&dest.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
     }
