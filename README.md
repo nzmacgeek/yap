@@ -85,6 +85,8 @@ make static                                 # same, explicit
 make dynamic                                # dynamically linked i386 ELF
 make DEBUG=1                                # debug build (-g -O0)
 make MUSL_PREFIX=/opt/blueyos-sysroot       # explicit sysroot path
+make YAP_BLUEYOS_COMPAT=0                   # standard UNIX datagram / AF_INET build
+make MUSL_PREFIX=/opt/blueyos-sysroot/usr install SYSROOT=/mnt/blueyos
 make clean                                  # remove build/
 ```
 
@@ -96,6 +98,24 @@ Output files:
 | `make` / `static`   | `build/yap-rotate`           | static i386 ELF (musl)   |
 | `make dynamic`      | `build/yap-dynamic`          | dynamic i386 ELF (musl)  |
 | `make dynamic`      | `build/yap-rotate-dynamic`   | dynamic i386 ELF (musl)  |
+
+### BlueyOS compatibility mode
+
+By default, yap builds with `YAP_BLUEYOS_COMPAT=1`.
+
+This mode matches the current BlueyOS kernel socket ABI rather than the
+traditional Linux syslog ABI:
+
+- `/dev/log` is created as `AF_UNIX` + `SOCK_STREAM`
+- local stream clients are accepted and newline-delimited syslog records are parsed
+- UDP listen/forwarding code is compiled in but feature-gated off at runtime
+
+This is a short-term compatibility mode for current BlueyOS. It does **not**
+make musl-blueyos `syslog(3)` fully compatible yet, because musl currently
+opens `/dev/log` as `AF_UNIX` + `SOCK_DGRAM`.
+
+Use `YAP_BLUEYOS_COMPAT=0` if you want the standard local datagram socket and
+AF_INET UDP behavior on a host that actually supports them.
 
 ---
 
@@ -198,6 +218,49 @@ claw-rootfs.target → yap → claw-basic.target → (rest of services)
 yap uses `type: simple` with `-n` (no-daemonize) so claw can supervise it
 directly. This means claw captures its stdout/stderr and tracks its PID.
 
+### Current socket ABI caveat
+
+Current BlueyOS exposes `AF_UNIX` stream sockets plus a custom `AF_NETCTL`
+family, but not `AF_UNIX` datagram sockets or `AF_INET` userland sockets.
+That is why yap's compatibility mode uses a stream listener for `/dev/log`
+and disables UDP receive/forwarding.
+
+---
+
+## musl-blueyos syslog behavior
+
+musl-blueyos currently follows the traditional syslog client model:
+
+- `openlog()` opens `socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0)`
+- it `connect()`s that socket to `/dev/log`
+- `syslog()` sends complete RFC 3164 messages with `send()`
+
+That means the current BlueyOS kernel, musl-blueyos, and yap do not yet form a
+fully compatible local syslog stack. yap's stream-mode listener is only a
+temporary server-side adaptation.
+
+## Minimum kernel work for proper AF_UNIX datagram support
+
+To support the normal `/dev/log` syslog path without compatibility mode, the
+minimum BlueyOS kernel work is:
+
+1. Accept `AF_UNIX` + `SOCK_DGRAM` in the socket creation path instead of only
+  `SOCK_STREAM`.
+2. Add datagram socket state that binds directly to a pathname without
+  requiring `listen()` / `accept()`.
+3. Implement datagram `connect()` so a client can associate its socket with a
+  bound pathname like `/dev/log`.
+4. Preserve message boundaries for local delivery so one `send()` becomes one
+  receive record at the server side.
+5. Implement the user-visible receive/send path for connected datagrams,
+  ideally covering `send`, `recv`, `sendto`, and `recvfrom` semantics.
+6. Keep readiness and error reporting aligned with the existing syscall layer
+  so unsupported families return `EAFNOSUPPORT` and unsupported types return
+  `EPROTONOSUPPORT`.
+
+AF_INET UDP syslog is separate follow-on work. The current compatibility mode
+only addresses the local `/dev/log` path.
+
 ---
 
 ## Packaging (dimsim)
@@ -226,6 +289,27 @@ This builds the static i386 ELF binaries, stages them under `pkg/payload/sbin/`,
 and invokes `dpkbuild build pkg/` to produce `yap-<version>-i386.dpk`.
 
 ### Installing into an offline sysroot
+
+If you want to copy yap directly into a mounted rootfs without creating a
+`.dpk`, use `make install` with an explicit sysroot:
+
+```bash
+mount -o loop blueyos.img /mnt/blueyos
+make MUSL_PREFIX=/opt/blueyos-sysroot/usr install SYSROOT=/mnt/blueyos
+umount /mnt/blueyos
+```
+
+This installs:
+
+- `/sbin/yap`
+- `/sbin/yap-rotate`
+- `/etc/yap.yml`
+- `/etc/claw/services.d/yap.service.yml`
+- `/etc/claw/services.d/yap-rotate.service.yml`
+
+It does not build a dimsim package or run package lifecycle scripts.
+
+### Installing via dimsim package
 
 ```bash
 # Mount the target rootfs
