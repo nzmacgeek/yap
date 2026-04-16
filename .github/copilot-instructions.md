@@ -62,6 +62,7 @@ debug-only messages.
   not use `system()` or `popen()`.
 - Always add a corresponding entry in `docs/DEFECT_ANALYSIS.md` when fixing a
   catalogued defect.
+- Use our standard `bstrncpy` wrapper instead of `strncpy` for all string copying to ensure null-termination. Build you own wrappers for other string functions as needed, and use them consistently across the codebase to make sure they handle edge cases correctly and avoid common pitfalls like null termination, buffer overflows, and off-by-one errors.
 
 ---
 

@@ -37,7 +37,9 @@
  * Constants
  * ---------------------------------------------------------------------- */
 
-#define YAP_VERSION     "0.1.0"
+#ifndef YAP_VERSION
+#define YAP_VERSION     "0.2.0"
+#endif
 #define YAP_CONFIG      "/etc/yap.yml"
 #define YAP_PIDFILE     "/var/run/yap.pid"
 #define YAP_LOGFILE     "/var/log/system.log"
