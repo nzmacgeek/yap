@@ -1,0 +1,16 @@
+#!/bin/bash
+# Post-installation script for yap
+# Called after files are placed.
+set -e
+
+echo "yap installed — Let me tell you about my day!"
+echo "Claw service units are in /etc/claw/services.d/."
+echo ""
+echo "  yap starts as part of claw-basic.target."
+echo "  yap-rotate runs as a claw timer service to rotate /var/log/system.log."
+echo ""
+echo "  Configuration: /etc/yap.yml"
+echo "  Log output:    /var/log/system.log"
+echo ""
+
+exit 0

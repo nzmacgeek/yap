@@ -1,0 +1,14 @@
+{
+  "name": "yap",
+  "version": "0.1.0",
+  "arch": "i386",
+  "description": "Syslog daemon for BlueyOS — Let me tell you about my day!",
+  "depends": [],
+  "recommends": [],
+  "conflicts": [],
+  "provides": ["syslog"],
+  "maintainer": "BlueyOS Maintainers <maintainers@blueyos.example>",
+  "homepage": "https://github.com/nzmacgeek/yap",
+  "files": [],
+  "scripts": {}
+}

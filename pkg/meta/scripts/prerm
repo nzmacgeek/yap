@@ -1,0 +1,12 @@
+#!/bin/bash
+# Pre-removal script for yap
+# Called before files are removed.
+set -e
+
+# Stop yap if claw is running
+if command -v clawctl >/dev/null 2>&1; then
+    clawctl stop yap-rotate 2>/dev/null || true
+    clawctl stop yap        2>/dev/null || true
+fi
+
+exit 0

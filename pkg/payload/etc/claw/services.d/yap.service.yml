@@ -1,0 +1,15 @@
+# /etc/claw/services.d/yap.service.yml
+# yap syslog daemon — "Let me tell you about my day!"
+#
+# yap starts as part of claw-basic.target, providing the /dev/log socket
+# to all system services that come up after it.
+name: yap
+aliases: claw-syslog.service
+description: "Let me tell you about my day! — yap syslog daemon"
+type: simple
+start_cmd: /sbin/yap -n
+user: root
+restart: always
+restart_delay: 2
+after: claw-rootfs.target
+before: claw-basic.target

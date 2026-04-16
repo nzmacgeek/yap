@@ -1,0 +1,7 @@
+#!/bin/bash
+# Post-removal script for yap
+# Called after files are removed.
+set -e
+
+echo "yap removed — That was a big day, wasn't it!"
+exit 0
