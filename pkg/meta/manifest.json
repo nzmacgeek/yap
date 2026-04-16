@@ -1,6 +1,6 @@
 {
   "name": "yap",
-  "version": "0.1.0",
+  "version": "0.2.0-1",
   "arch": "i386",
   "description": "Syslog daemon for BlueyOS — Let me tell you about my day!",
   "depends": [],

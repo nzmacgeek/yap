@@ -12,8 +12,9 @@
 #
 # Variables (override on command line):
 #   MUSL_PREFIX       - path to an installed musl-blueyos sysroot
-#                       Defaults to /opt/blueyos-sysroot when that directory
-#                       exists, otherwise falls back to build/musl.
+#                       Defaults to /opt/blueyos-sysroot/usr when musl is
+#                       installed under the BlueyOS sysroot, otherwise falls
+#                       back to /opt/blueyos-sysroot or build/musl.
 #   BUILD_DIR         - output directory (default: build)
 #   SYSROOT           - target root directory for `make install`
 #                       (DESTDIR is accepted as an alias)
@@ -23,7 +24,7 @@
 #                       (/dev/log via AF_UNIX/SOCK_STREAM, AF_INET disabled)
 #
 # Quick start on a BlueyOS build host (sysroot at /opt/blueyos-sysroot):
-#   make                              # MUSL_PREFIX auto-resolves to /opt/blueyos-sysroot
+#   make                              # MUSL_PREFIX auto-resolves to the installed musl prefix
 #
 # Quick start on a fresh host:
 #   make musl                         # clones musl-blueyos and builds into build/musl/
@@ -37,12 +38,18 @@
 # Directories and tool paths
 # ---------------------------------------------------------------------------
 BUILD_DIR ?= build
+VERSION ?= 0.2.0
+PACKAGE_BUILD_NUMBER ?= 1
+PACKAGE_VERSION ?= $(VERSION)-$(PACKAGE_BUILD_NUMBER)
 
-# Prefer the system-wide BlueyOS sysroot (/opt/blueyos-sysroot) when present;
-# this is where BlueyOS build hosts install musl-blueyos by default.
-# Fall back to the local build/musl tree for fresh/CI environments.
+# Prefer the system-wide BlueyOS sysroot (/opt/blueyos-sysroot) when present.
+# Some hosts install musl-blueyos under /opt/blueyos-sysroot/usr, while
+# others install it directly under /opt/blueyos-sysroot. Fall back to the
+# local build/musl tree for fresh/CI environments.
 BLUEYOS_SYSROOT ?= /opt/blueyos-sysroot
-ifeq ($(shell [ -d $(BLUEYOS_SYSROOT) ] && echo yes),yes)
+ifeq ($(shell [ -d $(BLUEYOS_SYSROOT)/usr/include ] && [ -f $(BLUEYOS_SYSROOT)/usr/lib/libc.a ] && echo yes),yes)
+	MUSL_PREFIX ?= $(BLUEYOS_SYSROOT)/usr
+else ifeq ($(shell [ -d $(BLUEYOS_SYSROOT)/include ] && [ -f $(BLUEYOS_SYSROOT)/lib/libc.a ] && echo yes),yes)
   MUSL_PREFIX ?= $(BLUEYOS_SYSROOT)
 else
   MUSL_PREFIX ?= $(BUILD_DIR)/musl
@@ -94,13 +101,13 @@ BASE_LDFLAGS := \
 # ---------------------------------------------------------------------------
 # Static build flags (default)
 # ---------------------------------------------------------------------------
-STATIC_CFLAGS  := $(BASE_CFLAGS) -fno-pic -isystem $(MUSL_INCLUDE)
+STATIC_CFLAGS  := $(BASE_CFLAGS) -fno-pic -isystem $(MUSL_INCLUDE) -DYAP_VERSION=\"$(VERSION)\"
 STATIC_LDFLAGS := $(BASE_LDFLAGS) -static -no-pie -L$(MUSL_LIB)
 
 # ---------------------------------------------------------------------------
 # Dynamic build flags
 # ---------------------------------------------------------------------------
-DYNAMIC_CFLAGS  := $(BASE_CFLAGS) -fPIC -isystem $(MUSL_INCLUDE)
+DYNAMIC_CFLAGS  := $(BASE_CFLAGS) -fPIC -isystem $(MUSL_INCLUDE) -DYAP_VERSION=\"$(VERSION)\"
 DYNAMIC_LDFLAGS := $(BASE_LDFLAGS) -no-pie -L$(MUSL_LIB)
 
 # ---------------------------------------------------------------------------
@@ -183,6 +190,7 @@ $(BUILD_DIR):
 # package — build the yap .dpk for installation into a BlueyOS sysroot
 # ---------------------------------------------------------------------------
 PKG_DIR        := pkg
+PKG_MANIFEST   := $(PKG_DIR)/meta/manifest.json
 PAYLOAD_DIR    := $(PKG_DIR)/payload
 PKG_YAP        := $(PKG_DIR)/payload/sbin/yap
 PKG_ROTATE     := $(PKG_DIR)/payload/sbin/yap-rotate
@@ -227,13 +235,19 @@ package: static
 		echo ""; \
 		exit 1; \
 	}
+	@grep -Eq '"version"[[:space:]]*:[[:space:]]*"$(PACKAGE_VERSION)"' $(PKG_MANIFEST) || { \
+		echo ""; \
+		echo "  [PKG]  $(PKG_MANIFEST) version must be $(PACKAGE_VERSION) before packaging."; \
+		echo ""; \
+		exit 1; \
+	}
 	@mkdir -p $(PKG_DIR)/payload/sbin
 	@cp $(YAP_BIN)    $(PKG_YAP)
 	@cp $(ROTATE_BIN) $(PKG_ROTATE)
 	@chmod 0755 $(PKG_YAP) $(PKG_ROTATE)
 	dpkbuild build $(PKG_DIR)/
 	@echo ""
-	@echo "  [PKG]  yap package built."
+	@echo "  [PKG]  yap package built: yap-$(PACKAGE_VERSION)-i386.dpk"
 	@echo ""
 
 # ---------------------------------------------------------------------------
@@ -258,7 +272,7 @@ help:
 	@echo "  make static       same as above, explicit"
 	@echo "  make dynamic      build dynamically linked i386 ELF"
 	@echo "  make install      install into SYSROOT or DESTDIR"
-	@echo "  make package      build yap-<version>-i386.dpk for dimsim (requires dpkbuild)"
+	@echo "  make package      build yap-<package-version>-i386.dpk for dimsim (requires dpkbuild)"
 	@echo "  make clean        remove build artefacts"
 	@echo ""
 	@echo "  Variables:"
@@ -268,10 +282,13 @@ help:
 	@echo "    DESTDIR=/path        alias for SYSROOT"
 	@echo ""
 	@echo "Variables:"
+	@echo "  VERSION=...       binary version         (default: $(VERSION))"
+	@echo "  PACKAGE_BUILD_NUMBER=... package build   (default: $(PACKAGE_BUILD_NUMBER))"
+	@echo "  PACKAGE_VERSION=... effective package version (default: $(PACKAGE_VERSION))"
 	@echo "  MUSL_PREFIX=...   path to musl sysroot (default: $(BUILD_DIR)/musl)"
 	@echo "  BUILD_DIR=...     output directory      (default: build)"
 	@echo "  DEBUG=1           enable debug build"
 	@echo ""
 	@echo "Example:"
-	@echo "  make MUSL_PREFIX=/opt/blueyos-sysroot"
+	@echo "  make MUSL_PREFIX=/opt/blueyos-sysroot/usr"
 	@echo "  make MUSL_PREFIX=/opt/blueyos-sysroot/usr install SYSROOT=/mnt/blueyos"

@@ -66,15 +66,16 @@ sudo apt-get install -y gcc-multilib binutils git
 yap is built against [musl-blueyos](https://github.com/nzmacgeek/musl-blueyos),
 a BlueyOS-flavoured fork of musl libc.
 
-**On a BlueyOS build host** the sysroot is already installed at
-`/opt/blueyos-sysroot` — the Makefile detects this automatically.
+**On a BlueyOS build host** the sysroot is already installed under
+`/opt/blueyos-sysroot`, usually with musl headers and libraries in
+`/opt/blueyos-sysroot/usr`. The Makefile detects either layout automatically.
 
 **On a fresh host** run the helper script to clone and build it:
 
 ```bash
 make musl                        # clones musl-blueyos, installs into build/musl/
 # or with a custom prefix:
-make musl MUSL_PREFIX=/opt/blueyos-sysroot
+make musl MUSL_PREFIX=/opt/blueyos-sysroot/usr
 ```
 
 ### 2. Build yap
@@ -84,7 +85,7 @@ make                                        # static i386 ELF (default)
 make static                                 # same, explicit
 make dynamic                                # dynamically linked i386 ELF
 make DEBUG=1                                # debug build (-g -O0)
-make MUSL_PREFIX=/opt/blueyos-sysroot       # explicit sysroot path
+make MUSL_PREFIX=/opt/blueyos-sysroot/usr   # explicit sysroot path
 make YAP_BLUEYOS_COMPAT=0                   # standard UNIX datagram / AF_INET build
 make MUSL_PREFIX=/opt/blueyos-sysroot/usr install SYSROOT=/mnt/blueyos
 make clean                                  # remove build/
@@ -286,7 +287,9 @@ make package
 ```
 
 This builds the static i386 ELF binaries, stages them under `pkg/payload/sbin/`,
-and invokes `dpkbuild build pkg/` to produce `yap-<version>-i386.dpk`.
+and invokes `dpkbuild build pkg/` to produce `yap-<package-version>-i386.dpk`.
+Full package builds include the current package build number in the manifest
+version, so a 0.2.0 release build produces `yap-0.2.0-1-i386.dpk`.
 
 ### Installing into an offline sysroot
 
@@ -316,7 +319,7 @@ It does not build a dimsim package or run package lifecycle scripts.
 mount -o loop blueyos.img /mnt/blueyos
 
 # Install yap (no network needed — pass the local .dpk directly)
-dimsim --root /mnt/blueyos install ./yap-<version>-i386.dpk
+dimsim --root /mnt/blueyos install ./yap-<package-version>-i386.dpk
 
 # Unmount and boot
 umount /mnt/blueyos
