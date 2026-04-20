@@ -191,6 +191,12 @@ static void write_log_bytes(const char *buf, size_t len)
     if (lock_fd < 0)
         return;
 
+    if (lseek(g_log_fd, 0, SEEK_END) < 0) {
+        close(lock_fd);
+        unlink(YAP_LOGLOCK);
+        return;
+    }
+
     while (written < len) {
         ssize_t n = write(g_log_fd, buf + written, len - written);
         if (n > 0) {
