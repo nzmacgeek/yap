@@ -6,7 +6,7 @@
  * "Let me tell you about my day!" - Bluey Heeler
  *
  * yap is a standards-compliant syslog daemon for BlueyOS. It listens on
- * /dev/log for syslog messages from local applications, optionally accepts
+ * a local input endpoint for syslog messages from local applications, optionally accepts
  * RFC 3164 messages on UDP port 514, writes them to /var/log/system.log
  * (configurable), and can forward them to a remote syslog sink.
  *
@@ -55,7 +55,7 @@
 #endif
 #define YAP_CONFIG      "/etc/yap.yml"
 #define YAP_PIDFILE     "/var/run/yap.pid"
-#define YAP_SOCKET_PATH "/dev/log"
+#define YAP_SOCKET_PATH "/run/log/yap.inbox"
 #define YAP_LOGFILE     "/var/log/system.log"
 #define YAP_UDP_PORT    514
 
@@ -66,25 +66,21 @@
 #define MAX_TAG     128    /* maximum syslog tag length */
 
 /*
- * BlueyOS compatibility mode targets the current biscuits socket ABI.
- * Today that kernel supports AF_UNIX stream sockets but not AF_UNIX
- * datagrams or AF_INET userland sockets, so local /dev/log must be a
- * stream listener and UDP features must be disabled.
+ * BlueyOS compatibility mode targets the current biscuits userspace/kernel ABI.
+ * AF_UNIX readiness and receive behavior are still being stabilized there, so
+ * local syslog uses a simple append-only inbox file while UDP features stay disabled.
  */
 #ifndef YAP_BLUEYOS_COMPAT
 #define YAP_BLUEYOS_COMPAT 1
 #endif
 
 #if YAP_BLUEYOS_COMPAT
-#define YAP_LOCAL_SOCKET_TYPE  SOCK_STREAM
-#define YAP_LOCAL_SOCKET_LABEL "AF_UNIX/SOCK_STREAM"
+#define YAP_LOCAL_SOCKET_LABEL "append-only inbox"
 #define YAP_HAVE_INET_SOCKETS  0
-#define YAP_LOCAL_CLIENTS_MAX  8
 #else
 #define YAP_LOCAL_SOCKET_TYPE  SOCK_DGRAM
 #define YAP_LOCAL_SOCKET_LABEL "AF_UNIX/SOCK_DGRAM"
 #define YAP_HAVE_INET_SOCKETS  1
-#define YAP_LOCAL_CLIENTS_MAX  0
 #endif
 
 /* Syslog facility codes (RFC 3164) */
@@ -123,7 +119,7 @@
 
 struct yap_config {
     char log_file[MAX_PATH];   /* output log file path */
-    char socket_path[MAX_PATH];/* /dev/log UNIX socket path */
+    char socket_path[MAX_PATH];/* local input path */
     int  listen_udp;           /* 1 = listen on UDP 514 */
     int  udp_port;             /* UDP port to listen on */
 
@@ -139,20 +135,15 @@ struct yap_config {
 
 static struct yap_config g_cfg;
 static int  g_log_fd   = -1;   /* output log file fd */
-static int  g_unix_fd  = -1;   /* /dev/log socket fd */
+static int  g_unix_fd  = -1;   /* local input fd */
 static int  g_udp_fd   = -1;   /* UDP socket fd */
 static int  g_fwd_fd   = -1;   /* forwarding socket fd */
 static char g_hostname[MAX_HOST];
-
-#if YAP_BLUEYOS_COMPAT
-struct local_client {
-    int fd;
-    char buf[MAX_MSG];
-    size_t len;
-};
-
-static struct local_client g_local_clients[YAP_LOCAL_CLIENTS_MAX];
-#endif
+static char g_recv_buf[MAX_MSG];
+static char g_write_buf[MAX_MSG + MAX_HOST + MAX_TAG + 128];
+static char g_line_buf[MAX_MSG];
+static size_t g_line_len = 0;
+static off_t g_input_offset = 0;
 
 /* Signal flags — set by signal handlers, checked in main loop */
 static volatile sig_atomic_t g_flag_reload   = 0;
@@ -632,30 +623,38 @@ static void reopen_log_file(void)
 
 static void write_log_entry(const struct syslog_msg *msg)
 {
-    int written;
+    int len;
 
     if (g_log_fd < 0)
         return;
 
     if (msg->pid >= 0) {
-        written = dprintf(g_log_fd, "%s %s %s[%d]: <%s.%s> %s\n",
-                          msg->timestamp,
-                          msg->hostname,
-                          msg->tag,
-                          msg->pid,
-                          facility_name(msg->facility),
-                          severity_name(msg->severity),
-                          msg->message);
+        len = snprintf(g_write_buf, sizeof(g_write_buf),
+                       "%s %s %s[%d]: <%s.%s> %s\n",
+                       msg->timestamp,
+                       msg->hostname,
+                       msg->tag,
+                       msg->pid,
+                       facility_name(msg->facility),
+                       severity_name(msg->severity),
+                       msg->message);
     } else {
-        written = dprintf(g_log_fd, "%s %s %s: <%s.%s> %s\n",
-                          msg->timestamp,
-                          msg->hostname,
-                          msg->tag,
-                          facility_name(msg->facility),
-                          severity_name(msg->severity),
-                          msg->message);
+        len = snprintf(g_write_buf, sizeof(g_write_buf),
+                       "%s %s %s: <%s.%s> %s\n",
+                       msg->timestamp,
+                       msg->hostname,
+                       msg->tag,
+                       facility_name(msg->facility),
+                       severity_name(msg->severity),
+                       msg->message);
     }
-    (void)written;
+
+    if (len < 0)
+        return;
+    if ((size_t)len >= sizeof(g_write_buf))
+        len = (int)sizeof(g_write_buf) - 1;
+
+    (void)write(g_log_fd, g_write_buf, (size_t)len);
 }
 
 /* -------------------------------------------------------------------------
@@ -745,17 +744,32 @@ static void forward_message(const struct syslog_msg *msg, const char *raw, size_
 }
 
 /* -------------------------------------------------------------------------
- * Socket setup
+ * Local input setup
  * ---------------------------------------------------------------------- */
 
-static int setup_unix_socket(const char *path)
+#if YAP_BLUEYOS_COMPAT
+static int setup_local_input(const char *path)
+{
+    int fd;
+    unlink(path);
+
+    fd = open(path, O_RDONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd < 0) {
+        fprintf(stderr, "yap: open(%s): %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    chmod(path, 0666);
+    g_input_offset = 0;
+    return fd;
+}
+#else
+static int setup_local_input(const char *path)
 {
     struct sockaddr_un addr;
     int fd;
 
-    /* Remove stale socket */
     unlink(path);
-
     fd = socket(AF_UNIX, YAP_LOCAL_SOCKET_TYPE, 0);
     if (fd < 0) {
         fprintf(stderr, "yap: socket(%s): %s\n",
@@ -765,7 +779,6 @@ static int setup_unix_socket(const char *path)
 
     memset(&addr, 0, sizeof(addr));
     addr.sun_family = AF_UNIX;
-    /* sun_path is typically 108 bytes; check the path fits */
     if (strlen(path) >= sizeof(addr.sun_path)) {
         fprintf(stderr, "yap: socket path too long (max %zu): %s\n",
                 sizeof(addr.sun_path) - 1, path);
@@ -780,19 +793,11 @@ static int setup_unix_socket(const char *path)
         return -1;
     }
 
-#if YAP_BLUEYOS_COMPAT
-    if (listen(fd, YAP_LOCAL_CLIENTS_MAX) < 0) {
-        fprintf(stderr, "yap: listen(%s): %s\n", path, strerror(errno));
-        close(fd);
-        return -1;
-    }
-#endif
-
-    /* Allow any process to write to the socket */
     chmod(path, 0666);
 
     return fd;
 }
+#endif
 
 static int setup_udp_socket(int port)
 {
@@ -858,8 +863,11 @@ static void do_reload(void)
 {
     struct yap_config new_cfg;
     int old_forward_enabled;
+    char old_input_path[MAX_PATH];
 
     yap_log("reloading configuration — Bluey has more to say!");
+    strncpy(old_input_path, g_cfg.socket_path, sizeof(old_input_path) - 1);
+    old_input_path[sizeof(old_input_path) - 1] = '\0';
 
     if (config_load(YAP_CONFIG, &new_cfg) < 0) {
         yap_log("config reload failed — keeping current settings");
@@ -883,125 +891,67 @@ static void do_reload(void)
         g_fwd_fd = setup_forward_socket();
     }
 
+    if (strcmp(old_input_path, g_cfg.socket_path) != 0) {
+        if (g_unix_fd >= 0)
+            close(g_unix_fd);
+        g_unix_fd = setup_local_input(g_cfg.socket_path);
+        if (g_unix_fd < 0)
+            yap_log("cannot reopen local input %s", g_cfg.socket_path);
+        g_line_len = 0;
+        g_input_offset = 0;
+    }
+
     yap_log("configuration reloaded — ready to yap again!");
 }
 
 #if YAP_BLUEYOS_COMPAT
-static void init_local_clients(void)
-{
-    int i;
-
-    for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++) {
-        g_local_clients[i].fd = -1;
-        g_local_clients[i].len = 0;
-    }
-}
-
-static void flush_local_client(struct local_client *client)
-{
-    if (!client || client->fd < 0 || client->len == 0)
-        return;
-
-    client->buf[client->len] = '\0';
-    process_message(client->buf, client->len);
-    client->len = 0;
-}
-
-static void close_local_client(struct local_client *client)
-{
-    if (!client || client->fd < 0)
-        return;
-
-    flush_local_client(client);
-    close(client->fd);
-    client->fd = -1;
-    client->len = 0;
-}
-
-static void close_all_local_clients(void)
-{
-    int i;
-
-    for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++)
-        close_local_client(&g_local_clients[i]);
-}
-
-static void queue_local_client_data(struct local_client *client,
-                                    const char *buf, size_t len)
+static void process_local_bytes(const char *buf, size_t len)
 {
     size_t i;
 
     for (i = 0; i < len; i++) {
         char ch = buf[i];
 
-        if (ch == '\0' || ch == '\r')
-            continue;
-
         if (ch == '\n') {
-            flush_local_client(client);
+            if (g_line_len > 0)
+                process_message(g_line_buf, g_line_len);
+            g_line_len = 0;
             continue;
         }
 
-        if (client->len >= sizeof(client->buf) - 1)
-            flush_local_client(client);
-
-        client->buf[client->len++] = ch;
+        if (g_line_len + 1 < sizeof(g_line_buf))
+            g_line_buf[g_line_len++] = ch;
     }
 }
 
-static void accept_local_client(void)
+static void receive_local_message(void)
 {
-    int client_fd;
-    int i;
-    int flags;
-
-    client_fd = accept(g_unix_fd, NULL, NULL);
-    if (client_fd < 0) {
-        if (errno != EINTR)
-            yap_log("accept(%s) failed: %s", g_cfg.socket_path, strerror(errno));
-        return;
-    }
-
-    flags = fcntl(client_fd, F_GETFL, 0);
-    if (flags >= 0)
-        fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
-
-    for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++) {
-        if (g_local_clients[i].fd >= 0)
-            continue;
-
-        g_local_clients[i].fd = client_fd;
-        g_local_clients[i].len = 0;
-        return;
-    }
-
-    yap_log("too many local syslog clients — dropping connection");
-    close(client_fd);
-}
-
-static void handle_local_client_readable(struct local_client *client)
-{
-    char buf[MAX_MSG];
+    int fd;
     ssize_t n;
 
-    if (!client || client->fd < 0)
-        return;
-
-    n = recv(client->fd, buf, sizeof(buf), 0);
-    if (n > 0) {
-        queue_local_client_data(client, buf, (size_t)n);
+    fd = open(g_cfg.socket_path, O_RDONLY);
+    if (fd < 0) {
+        if (errno != ENOENT)
+            yap_log("open(%s) failed: %s", g_cfg.socket_path, strerror(errno));
         return;
     }
 
-    if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+    if (lseek(fd, g_input_offset, SEEK_SET) < 0) {
+        yap_log("seek(%s) failed: %s", g_cfg.socket_path, strerror(errno));
+        close(fd);
         return;
     }
 
-    if (n < 0) {
-        yap_log("local syslog stream read failed: %s", strerror(errno));
+    while ((n = read(fd, g_recv_buf, sizeof(g_recv_buf))) > 0)
+    {
+        g_input_offset += n;
+        process_local_bytes(g_recv_buf, (size_t)n);
     }
 
-    close_local_client(client);
+    if (n < 0 && errno != EINTR)
+        yap_log("read(%s) failed: %s", g_cfg.socket_path, strerror(errno));
+
+    close(fd);
 }
 #endif
 
@@ -1031,12 +981,12 @@ static void process_message(const char *buf, size_t len)
 
 static void receive_loop(void)
 {
-    char buf[MAX_MSG];
-    ssize_t n;
+#if YAP_BLUEYOS_COMPAT
+#else
     fd_set rfds;
     int max_fd;
-#if YAP_BLUEYOS_COMPAT
-    int i;
+    char buf[MAX_MSG];
+    ssize_t n;
 #endif
 
     yap_log("The Magic Claw has chosen yap to receive all the gossip!");
@@ -1051,6 +1001,23 @@ static void receive_loop(void)
     else if (g_cfg.forward_enabled)
         yap_log("remote forwarding requested but unavailable in this build");
 
+#if YAP_BLUEYOS_COMPAT
+    while (!g_flag_shutdown) {
+        if (g_flag_reload) {
+            g_flag_reload = 0;
+            do_reload();
+        }
+        if (g_flag_reopen) {
+            g_flag_reopen = 0;
+            reopen_log_file();
+        }
+
+        if (g_unix_fd >= 0)
+            receive_local_message();
+
+        sleep(1);
+    }
+#else
     while (!g_flag_shutdown) {
         /* Handle pending signals */
         if (g_flag_reload) {
@@ -1070,14 +1037,6 @@ static void receive_loop(void)
             FD_SET(g_unix_fd, &rfds);
             if (g_unix_fd > max_fd) max_fd = g_unix_fd;
         }
-#if YAP_BLUEYOS_COMPAT
-        for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++) {
-            if (g_local_clients[i].fd < 0)
-                continue;
-            FD_SET(g_local_clients[i].fd, &rfds);
-            if (g_local_clients[i].fd > max_fd) max_fd = g_local_clients[i].fd;
-        }
-#endif
         if (g_udp_fd >= 0) {
             FD_SET(g_udp_fd, &rfds);
             if (g_udp_fd > max_fd) max_fd = g_udp_fd;
@@ -1106,23 +1065,15 @@ static void receive_loop(void)
 
         /* Read from UNIX socket */
         if (g_unix_fd >= 0 && FD_ISSET(g_unix_fd, &rfds)) {
-#if YAP_BLUEYOS_COMPAT
-            accept_local_client();
-#else
             n = recv(g_unix_fd, buf, sizeof(buf) - 1, 0);
             if (n > 0) {
                 buf[n] = '\0';
                 process_message(buf, (size_t)n);
             }
-#endif
         }
 
-#if YAP_BLUEYOS_COMPAT
-        for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++)
-            handle_local_client_readable(&g_local_clients[i]);
-#endif
-
         /* Read from UDP socket */
+#if YAP_HAVE_INET_SOCKETS
         if (g_udp_fd >= 0 && FD_ISSET(g_udp_fd, &rfds)) {
             struct sockaddr_in src;
             socklen_t src_len = sizeof(src);
@@ -1133,7 +1084,9 @@ static void receive_loop(void)
                 process_message(buf, (size_t)n);
             }
         }
+#endif
     }
+#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -1212,6 +1165,7 @@ static void setup_signals(void)
     /* Ignore SIGPIPE (can occur when forwarding to a closed remote) */
     sa.sa_handler = SIG_IGN;
     sigaction(SIGPIPE, &sa, NULL);
+
 }
 
 /* -------------------------------------------------------------------------
@@ -1271,12 +1225,8 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-#if YAP_BLUEYOS_COMPAT
-    init_local_clients();
-#endif
-
-    /* Set up UNIX socket */
-    g_unix_fd = setup_unix_socket(g_cfg.socket_path);
+    /* Set up local input */
+    g_unix_fd = setup_local_input(g_cfg.socket_path);
     if (g_unix_fd < 0) {
         fprintf(stderr, "yap: cannot set up %s — aborting\n", g_cfg.socket_path);
         return EXIT_FAILURE;
@@ -1312,10 +1262,6 @@ int main(int argc, char *argv[])
     yap_log("yap shutting down — That was a big day, wasn't it!");
 
     close_log_file();
-
-#if YAP_BLUEYOS_COMPAT
-    close_all_local_clients();
-#endif
 
     if (g_unix_fd >= 0) {
         close(g_unix_fd);
