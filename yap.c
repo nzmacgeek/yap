@@ -148,7 +148,7 @@ static int  g_ready_written = 0;
 
 #if YAP_BLUEYOS_COMPAT
 #define YAP_COMPAT_SPOOL_MODE   01777
-#define YAP_COMPAT_LOCAL_HANDLE 1
+#define YAP_COMPAT_SUCCESS      0
 #define YAP_MAX_LOCAL_SOURCES   256
 
 struct local_source {
@@ -997,7 +997,7 @@ static int setup_local_input(const char *path)
         return -1;
     }
 
-    return YAP_COMPAT_LOCAL_HANDLE;
+    return YAP_COMPAT_SUCCESS;
 }
 #else
 static int setup_local_input(const char *path)
@@ -1145,15 +1145,24 @@ static void do_reload(void)
     }
 
     if (strcmp(old_input_path, g_cfg.socket_path) != 0) {
+        int new_unix_fd = -1;
+
+        new_unix_fd = setup_local_input(g_cfg.socket_path);
+        if (new_unix_fd < 0) {
+            yap_log("cannot reopen local input %s", g_cfg.socket_path);
+#if YAP_BLUEYOS_COMPAT
+            clear_local_sources();
+#endif
+            return;
+        }
+
 #if !YAP_BLUEYOS_COMPAT
         if (g_unix_fd >= 0) {
             close(g_unix_fd);
             g_unix_fd = -1;
         }
 #endif
-        g_unix_fd = setup_local_input(g_cfg.socket_path);
-        if (g_unix_fd < 0)
-            yap_log("cannot reopen local input %s", g_cfg.socket_path);
+        g_unix_fd = new_unix_fd;
 #if YAP_BLUEYOS_COMPAT
         clear_local_sources();
 #endif
