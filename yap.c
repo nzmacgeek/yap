@@ -269,6 +269,22 @@ static void yap_log(const char *fmt, ...)
     }
 }
 
+static void bstrncpy(char *dst, const char *src, size_t dst_size)
+{
+    size_t n;
+
+    if (!dst || dst_size == 0)
+        return;
+    if (!src) {
+        dst[0] = '\0';
+        return;
+    }
+
+    n = strnlen(src, dst_size - 1);
+    memcpy(dst, src, n);
+    dst[n] = '\0';
+}
+
 /* -------------------------------------------------------------------------
  * Config loading — minimal YAML parser
  * Handles:
@@ -1198,27 +1214,31 @@ static void poll_local_source(struct local_source *source)
         return;
     }
 
-    if (stat(path, &st) != 0) {
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
         if (errno != ENOENT)
-            yap_log("stat(%s) failed: %s", path, strerror(errno));
+            yap_log("open(%s) failed: %s", path, strerror(errno));
         return;
     }
 
-    if (!S_ISREG(st.st_mode))
+    if (fstat(fd, &st) != 0) {
+        yap_log("fstat(%s) failed: %s", path, strerror(errno));
+        close(fd);
         return;
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        return;
+    }
 
     if (st.st_size < source->offset) {
         source->offset = 0;
         source->line_len = 0;
     }
 
-    if (st.st_size <= source->offset)
-        return;
-
-    fd = open(path, O_RDONLY);
-    if (fd < 0) {
-        if (errno != ENOENT)
-            yap_log("open(%s) failed: %s", path, strerror(errno));
+    if (st.st_size <= source->offset) {
+        close(fd);
         return;
     }
 
@@ -1283,10 +1303,11 @@ static void receive_local_message(void)
             source = calloc(1, sizeof(*source));
             if (!source)
                 continue;
-            if (snprintf(source->name, sizeof(source->name), "%s", entry->d_name) >= (int)sizeof(source->name)) {
+            if (strlen(entry->d_name) >= sizeof(source->name)) {
                 free(source);
                 continue;
             }
+            bstrncpy(source->name, entry->d_name, sizeof(source->name));
             source->next = g_local_sources;
             g_local_sources = source;
             g_local_source_count++;
