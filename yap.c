@@ -161,6 +161,7 @@ struct local_source {
 
 static struct local_source *g_local_sources = NULL;
 static size_t g_local_source_count = 0;
+static int g_local_source_limit_warned = 0;
 #endif
 
 /* Signal flags — set by signal handlers, checked in main loop */
@@ -873,26 +874,21 @@ static void forward_message(const struct syslog_msg *msg, const char *raw, size_
 #if YAP_BLUEYOS_COMPAT
 static int remove_spool_path(const char *path)
 {
-    struct stat st;
     DIR *dir;
     struct dirent *entry;
     char item_path[MAX_PATH];
 
-    if (lstat(path, &st) != 0) {
+    dir = opendir(path);
+    if (!dir) {
+        if (errno == ENOTDIR) {
+            if (unlink(path) != 0 && errno != ENOENT)
+                return -1;
+            return 0;
+        }
         if (errno == ENOENT)
             return 0;
         return -1;
     }
-
-    if (!S_ISDIR(st.st_mode)) {
-        if (unlink(path) != 0 && errno != ENOENT)
-            return -1;
-        return 0;
-    }
-
-    dir = opendir(path);
-    if (!dir)
-        return -1;
 
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
@@ -1134,8 +1130,10 @@ static void do_reload(void)
 
     if (strcmp(old_input_path, g_cfg.socket_path) != 0) {
 #if !YAP_BLUEYOS_COMPAT
-        if (g_unix_fd >= 0)
+        if (g_unix_fd >= 0) {
             close(g_unix_fd);
+            g_unix_fd = -1;
+        }
 #endif
         g_unix_fd = setup_local_input(g_cfg.socket_path);
         if (g_unix_fd < 0)
@@ -1157,6 +1155,7 @@ static void clear_local_sources(void)
         g_local_sources = next;
     }
     g_local_source_count = 0;
+    g_local_source_limit_warned = 0;
 }
 
 static void process_local_bytes(struct local_source *source,
@@ -1261,7 +1260,6 @@ static void receive_local_message(void)
 
     while ((entry = readdir(dir)) != NULL) {
         struct local_source *source;
-        struct stat st;
 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
@@ -1269,16 +1267,19 @@ static void receive_local_message(void)
         if (snprintf(path, sizeof(path), "%s/%s", g_cfg.socket_path, entry->d_name) >= (int)sizeof(path))
             continue;
 
-        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
-            continue;
-
         source = g_local_sources;
         while (source && strcmp(source->name, entry->d_name) != 0)
             source = source->next;
 
         if (!source) {
-            if (g_local_source_count >= YAP_MAX_LOCAL_SOURCES)
+            if (g_local_source_count >= YAP_MAX_LOCAL_SOURCES) {
+                if (!g_local_source_limit_warned) {
+                    yap_log("spool source limit reached (%d); ignoring additional files",
+                            YAP_MAX_LOCAL_SOURCES);
+                    g_local_source_limit_warned = 1;
+                }
                 continue;
+            }
             source = calloc(1, sizeof(*source));
             if (!source)
                 continue;
@@ -1610,18 +1611,14 @@ int main(int argc, char *argv[])
     close_log_file();
 
     if (g_unix_fd >= 0) {
-        if (!YAP_BLUEYOS_COMPAT) {
-            close(g_unix_fd);
-        } else {
 #if YAP_BLUEYOS_COMPAT
-            clear_local_sources();
-            (void)clear_spool_dir(g_cfg.socket_path);
-            (void)rmdir(g_cfg.socket_path);
+        clear_local_sources();
+        (void)clear_spool_dir(g_cfg.socket_path);
+        (void)rmdir(g_cfg.socket_path);
+#else
+        close(g_unix_fd);
+        unlink(g_cfg.socket_path);
 #endif
-        }
-        if (!YAP_BLUEYOS_COMPAT) {
-            unlink(g_cfg.socket_path);
-        }
     }
     if (g_udp_fd >= 0)  close(g_udp_fd);
     if (g_fwd_fd >= 0)  close(g_fwd_fd);
