@@ -417,7 +417,6 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
 {
     const char *p = raw;
     const char *end;
-    char tmp[MAX_MSG];
     size_t copy_len;
 
     if (raw_len == 0)
@@ -428,19 +427,21 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
     msg->facility = FAC_USER;
     msg->severity = SEV_INFO;
 
-    /* Copy raw message into working buffer (NUL-terminated) */
+    /* Copy raw message into the message buffer (NUL-terminated) */
     copy_len = (raw_len < MAX_MSG) ? raw_len : MAX_MSG - 1;
-    memcpy(tmp, raw, copy_len);
-    tmp[copy_len] = '\0';
-    p = tmp;
+    memcpy(msg->buf, raw, copy_len);
+    msg->buf[copy_len] = '\0';
+    p = msg->buf;
 
     /* Strip trailing newlines */
     end = p + strlen(p);
     while (end > p && (*(end - 1) == '\n' || *(end - 1) == '\r'))
         end--;
     copy_len = (size_t)(end - p);
-    memcpy(msg->buf, p, copy_len);
-    msg->buf[copy_len] = '\0';
+    if (p != msg->buf) {
+        memmove(msg->buf, p, copy_len);
+        msg->buf[copy_len] = '\0';
+    }
     p = msg->buf;
 
     /* Parse <PRI> if present */
@@ -581,6 +582,7 @@ static int parse_syslog(const char *raw, size_t raw_len, struct syslog_msg *msg)
 static int open_log_file(const char *path)
 {
     int fd;
+    struct stat st;
 
     /* Ensure parent directory exists */
     char dir[MAX_PATH];
@@ -589,8 +591,15 @@ static int open_log_file(const char *path)
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
         *slash = '\0';
-        /* mkdir -p equivalent for the log dir — ignore errors if it exists */
-        mkdir(dir, 0755);
+        if (stat(dir, &st) != 0) {
+            if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+                fprintf(stderr, "yap: cannot create log directory %s: %s\n", dir, strerror(errno));
+                return -1;
+            }
+        } else if (!S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "yap: log parent %s exists but is not a directory\n", dir);
+            return -1;
+        }
     }
 
     fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
@@ -623,39 +632,29 @@ static void reopen_log_file(void)
 
 static void write_log_entry(const struct syslog_msg *msg)
 {
-    char line[MAX_MSG + MAX_LINE];
-    int n;
+    int written;
 
     if (g_log_fd < 0)
         return;
 
     if (msg->pid >= 0) {
-        n = snprintf(line, sizeof(line), "%s %s %s[%d]: <%s.%s> %s\n",
-                     msg->timestamp,
-                     msg->hostname,
-                     msg->tag,
-                     msg->pid,
-                     facility_name(msg->facility),
-                     severity_name(msg->severity),
-                     msg->message);
+        written = dprintf(g_log_fd, "%s %s %s[%d]: <%s.%s> %s\n",
+                          msg->timestamp,
+                          msg->hostname,
+                          msg->tag,
+                          msg->pid,
+                          facility_name(msg->facility),
+                          severity_name(msg->severity),
+                          msg->message);
     } else {
-        n = snprintf(line, sizeof(line), "%s %s %s: <%s.%s> %s\n",
-                     msg->timestamp,
-                     msg->hostname,
-                     msg->tag,
-                     facility_name(msg->facility),
-                     severity_name(msg->severity),
-                     msg->message);
+        written = dprintf(g_log_fd, "%s %s %s: <%s.%s> %s\n",
+                          msg->timestamp,
+                          msg->hostname,
+                          msg->tag,
+                          facility_name(msg->facility),
+                          severity_name(msg->severity),
+                          msg->message);
     }
-
-    if (n <= 0)
-        return;
-
-    /* Clamp to buffer size */
-    if ((size_t)n >= sizeof(line))
-        n = (int)sizeof(line) - 1;
-
-    ssize_t written = write(g_log_fd, line, (size_t)n);
     (void)written;
 }
 
@@ -954,6 +953,7 @@ static void accept_local_client(void)
 {
     int client_fd;
     int i;
+    int flags;
 
     client_fd = accept(g_unix_fd, NULL, NULL);
     if (client_fd < 0) {
@@ -961,6 +961,10 @@ static void accept_local_client(void)
             yap_log("accept(%s) failed: %s", g_cfg.socket_path, strerror(errno));
         return;
     }
+
+    flags = fcntl(client_fd, F_GETFL, 0);
+    if (flags >= 0)
+        fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
 
     for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++) {
         if (g_local_clients[i].fd >= 0)
@@ -989,7 +993,11 @@ static void handle_local_client_readable(struct local_client *client)
         return;
     }
 
-    if (n < 0 && errno != EINTR) {
+    if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return;
+    }
+
+    if (n < 0) {
         yap_log("local syslog stream read failed: %s", strerror(errno));
     }
 
@@ -1110,12 +1118,8 @@ static void receive_loop(void)
         }
 
 #if YAP_BLUEYOS_COMPAT
-        for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++) {
-            if (g_local_clients[i].fd >= 0 &&
-                FD_ISSET(g_local_clients[i].fd, &rfds)) {
-                handle_local_client_readable(&g_local_clients[i]);
-            }
-        }
+        for (i = 0; i < YAP_LOCAL_CLIENTS_MAX; i++)
+            handle_local_client_readable(&g_local_clients[i]);
 #endif
 
         /* Read from UDP socket */
