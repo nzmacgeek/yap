@@ -5,7 +5,7 @@
 # Output log file
 log_file: /var/log/system.log
 
-# Local yap inbox path (where local apps append syslog messages)
+# Local yap inbox directory (where local apps spool syslog messages)
 socket: /run/log/yap.inbox
 
 # Listen for syslog messages on UDP port 514 (RFC 3164 network syslog)
