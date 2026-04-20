@@ -1,0 +1,1 @@
+In `yap.c`, BlueyOS compat mode now scans all regular files under `g_cfg.socket_path` (default `/run/log/yap.inbox`) and tracks per-file offsets instead of polling only fixed `claw.log`/`matey.log` names.
