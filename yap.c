@@ -147,17 +147,20 @@ static char g_write_buf[MAX_MSG + MAX_HOST + MAX_TAG + 128];
 static int  g_ready_written = 0;
 
 #if YAP_BLUEYOS_COMPAT
+#define YAP_COMPAT_SPOOL_MODE   01777
+#define YAP_COMPAT_LOCAL_HANDLE 1
+#define YAP_MAX_LOCAL_SOURCES   256
+
 struct local_source {
-    const char *name;
+    char name[MAX_PATH];
     off_t offset;
     char line_buf[MAX_MSG];
     size_t line_len;
+    struct local_source *next;
 };
 
-static struct local_source g_local_sources[] = {
-    { "claw.log", 0, {0}, 0 },
-    { "matey.log", 0, {0}, 0 },
-};
+static struct local_source *g_local_sources = NULL;
+static size_t g_local_source_count = 0;
 #endif
 
 /* Signal flags — set by signal handlers, checked in main loop */
@@ -166,34 +169,31 @@ static volatile sig_atomic_t g_flag_reopen   = 0;
 static volatile sig_atomic_t g_flag_shutdown = 0;
 
 static void process_message(const char *buf, size_t len);
-
-static int acquire_log_lock(void)
-{
-    for (;;) {
-        int fd = open(YAP_LOGLOCK, O_WRONLY | O_CREAT | O_EXCL, 0600);
-        if (fd >= 0)
-            return fd;
-        if (errno != EEXIST)
-            return -1;
-        usleep(1000);
-    }
-}
+#if YAP_BLUEYOS_COMPAT
+static void clear_local_sources(void);
+#endif
 
 static void write_log_bytes(const char *buf, size_t len)
 {
-    int lock_fd;
+    struct flock lock;
     size_t written = 0;
 
     if (g_log_fd < 0 || !buf || len == 0)
         return;
 
-    lock_fd = acquire_log_lock();
-    if (lock_fd < 0)
+    memset(&lock, 0, sizeof(lock));
+    lock.l_type = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+
+    while (fcntl(g_log_fd, F_SETLKW, &lock) < 0) {
+        if (errno == EINTR)
+            continue;
         return;
+    }
 
     if (lseek(g_log_fd, 0, SEEK_END) < 0) {
-        close(lock_fd);
-        unlink(YAP_LOGLOCK);
+        lock.l_type = F_UNLCK;
+        (void)fcntl(g_log_fd, F_SETLK, &lock);
         return;
     }
 
@@ -208,8 +208,8 @@ static void write_log_bytes(const char *buf, size_t len)
         break;
     }
 
-    close(lock_fd);
-    unlink(YAP_LOGLOCK);
+    lock.l_type = F_UNLCK;
+    (void)fcntl(g_log_fd, F_SETLK, &lock);
 }
 
 /* -------------------------------------------------------------------------
@@ -659,6 +659,70 @@ static int open_log_file(const char *path)
     return fd;
 }
 
+#if YAP_BLUEYOS_COMPAT
+static int mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[MAX_PATH];
+    char *p;
+    struct stat st;
+
+    if (!path || path[0] == '\0') {
+        errno = EINVAL;
+        return -1;
+    }
+    if (strlen(path) >= sizeof(tmp)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(tmp, path, strlen(path) + 1);
+
+    for (p = tmp + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+
+        *p = '\0';
+        if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+            return -1;
+        if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            errno = ENOTDIR;
+            return -1;
+        }
+        *p = '/';
+    }
+
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+        return -1;
+    if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        errno = ENOTDIR;
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ensure_parent_dir(const char *path, mode_t mode)
+{
+    char parent[MAX_PATH];
+    char *slash;
+
+    if (!path || path[0] == '\0')
+        return 0;
+    if (strlen(path) >= sizeof(parent)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    memcpy(parent, path, strlen(path) + 1);
+    slash = strrchr(parent, '/');
+    if (!slash || slash == parent)
+        return 0;
+    *slash = '\0';
+
+    return mkdir_p(parent, mode);
+}
+#endif
+
 static void close_log_file(void)
 {
     if (g_log_fd >= 0) {
@@ -807,6 +871,53 @@ static void forward_message(const struct syslog_msg *msg, const char *raw, size_
  * ---------------------------------------------------------------------- */
 
 #if YAP_BLUEYOS_COMPAT
+static int remove_spool_path(const char *path)
+{
+    struct stat st;
+    DIR *dir;
+    struct dirent *entry;
+    char item_path[MAX_PATH];
+
+    if (lstat(path, &st) != 0) {
+        if (errno == ENOENT)
+            return 0;
+        return -1;
+    }
+
+    if (!S_ISDIR(st.st_mode)) {
+        if (unlink(path) != 0 && errno != ENOENT)
+            return -1;
+        return 0;
+    }
+
+    dir = opendir(path);
+    if (!dir)
+        return -1;
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        if (snprintf(item_path, sizeof(item_path), "%s/%s", path, entry->d_name) >= (int)sizeof(item_path)) {
+            closedir(dir);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+
+        if (remove_spool_path(item_path) != 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    closedir(dir);
+
+    if (rmdir(path) != 0 && errno != ENOENT)
+        return -1;
+
+    return 0;
+}
+
 static int clear_spool_dir(const char *path)
 {
     DIR *dir;
@@ -830,7 +941,7 @@ static int clear_spool_dir(const char *path)
             return -1;
         }
 
-        if (unlink(item_path) != 0 && errno != ENOENT) {
+        if (remove_spool_path(item_path) != 0) {
             closedir(dir);
             return -1;
         }
@@ -843,6 +954,11 @@ static int clear_spool_dir(const char *path)
 static int setup_local_input(const char *path)
 {
     struct stat st;
+
+    if (ensure_parent_dir(path, 0755) != 0) {
+        fprintf(stderr, "yap: cannot create spool parent for %s: %s\n", path, strerror(errno));
+        return -1;
+    }
 
     if (stat(path, &st) == 0) {
         if (!S_ISDIR(st.st_mode)) {
@@ -859,13 +975,17 @@ static int setup_local_input(const char *path)
         return -1;
     }
 
-    if (mkdir(path, 0777) != 0 && errno != EEXIST) {
+    if (mkdir(path, YAP_COMPAT_SPOOL_MODE) != 0 && errno != EEXIST) {
         fprintf(stderr, "yap: mkdir(%s): %s\n", path, strerror(errno));
         return -1;
     }
 
-    chmod(path, 0777);
-    return 0;
+    if (chmod(path, YAP_COMPAT_SPOOL_MODE) != 0) {
+        fprintf(stderr, "yap: chmod(%s): %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    return YAP_COMPAT_LOCAL_HANDLE;
 }
 #else
 static int setup_local_input(const char *path)
@@ -962,9 +1082,11 @@ static void remove_pidfile(void)
 static void write_readyfile(void)
 {
     int fd = open(YAP_READYFILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    g_ready_written = 1;
     if (fd >= 0) {
         close(fd);
-        g_ready_written = 1;
+    } else {
+        yap_log("cannot create readyfile %s: %s", YAP_READYFILE, strerror(errno));
     }
 }
 
@@ -1011,16 +1133,15 @@ static void do_reload(void)
     }
 
     if (strcmp(old_input_path, g_cfg.socket_path) != 0) {
+#if !YAP_BLUEYOS_COMPAT
         if (g_unix_fd >= 0)
             close(g_unix_fd);
+#endif
         g_unix_fd = setup_local_input(g_cfg.socket_path);
         if (g_unix_fd < 0)
             yap_log("cannot reopen local input %s", g_cfg.socket_path);
 #if YAP_BLUEYOS_COMPAT
-        for (size_t i = 0; i < sizeof(g_local_sources) / sizeof(g_local_sources[0]); i++) {
-            g_local_sources[i].offset = 0;
-            g_local_sources[i].line_len = 0;
-        }
+        clear_local_sources();
 #endif
     }
 
@@ -1028,6 +1149,16 @@ static void do_reload(void)
 }
 
 #if YAP_BLUEYOS_COMPAT
+static void clear_local_sources(void)
+{
+    while (g_local_sources) {
+        struct local_source *next = g_local_sources->next;
+        free(g_local_sources);
+        g_local_sources = next;
+    }
+    g_local_source_count = 0;
+}
+
 static void process_local_bytes(struct local_source *source,
                                 const char *buf,
                                 size_t len)
@@ -1074,7 +1205,15 @@ static void poll_local_source(struct local_source *source)
         return;
     }
 
-    if (!S_ISREG(st.st_mode) || st.st_size <= source->offset)
+    if (!S_ISREG(st.st_mode))
+        return;
+
+    if (st.st_size < source->offset) {
+        source->offset = 0;
+        source->line_len = 0;
+    }
+
+    if (st.st_size <= source->offset)
         return;
 
     fd = open(path, O_RDONLY);
@@ -1109,10 +1248,53 @@ static void poll_local_source(struct local_source *source)
 
 static void receive_local_message(void)
 {
-    size_t i;
+    DIR *dir;
+    struct dirent *entry;
+    char path[MAX_PATH];
 
-    for (i = 0; i < sizeof(g_local_sources) / sizeof(g_local_sources[0]); i++)
-        poll_local_source(&g_local_sources[i]);
+    dir = opendir(g_cfg.socket_path);
+    if (!dir) {
+        if (errno != ENOENT)
+            yap_log("open spool dir %s failed: %s", g_cfg.socket_path, strerror(errno));
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        struct local_source *source;
+        struct stat st;
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        if (snprintf(path, sizeof(path), "%s/%s", g_cfg.socket_path, entry->d_name) >= (int)sizeof(path))
+            continue;
+
+        if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+
+        source = g_local_sources;
+        while (source && strcmp(source->name, entry->d_name) != 0)
+            source = source->next;
+
+        if (!source) {
+            if (g_local_source_count >= YAP_MAX_LOCAL_SOURCES)
+                continue;
+            source = calloc(1, sizeof(*source));
+            if (!source)
+                continue;
+            if (snprintf(source->name, sizeof(source->name), "%s", entry->d_name) >= (int)sizeof(source->name)) {
+                free(source);
+                continue;
+            }
+            source->next = g_local_sources;
+            g_local_sources = source;
+            g_local_source_count++;
+        }
+
+        poll_local_source(source);
+    }
+
+    closedir(dir);
 }
 #endif
 
@@ -1428,12 +1610,16 @@ int main(int argc, char *argv[])
     close_log_file();
 
     if (g_unix_fd >= 0) {
-        if (!YAP_BLUEYOS_COMPAT)
+        if (!YAP_BLUEYOS_COMPAT) {
             close(g_unix_fd);
-        if (YAP_BLUEYOS_COMPAT) {
+        } else {
+#if YAP_BLUEYOS_COMPAT
+            clear_local_sources();
             (void)clear_spool_dir(g_cfg.socket_path);
             (void)rmdir(g_cfg.socket_path);
-        } else {
+#endif
+        }
+        if (!YAP_BLUEYOS_COMPAT) {
             unlink(g_cfg.socket_path);
         }
     }
