@@ -1,9 +1,12 @@
 /* Feature-test macros — must appear before any system headers */
 #define _POSIX_C_SOURCE 200809L
 
-/* Compile-time debug tracing — always on for BlueyOS diagnostic builds */
+/* Compile-time debug tracing — always on for BlueyOS diagnostic builds.
+ * Writes to /dev/console directly so output appears on the serial console
+ * even when stderr has been redirected to a log file by the supervisor. */
+static void yap_dbg_write(const char *fmt, ...) __attribute__((format(printf,1,2)));
 #define YAP_DBG(fmt, ...) \
-    fprintf(stderr, "[yap dbg %s:%d] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+    yap_dbg_write("[yap dbg %s:%d] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
 
 /*
  * yap - syslog daemon for BlueyOS
@@ -50,6 +53,20 @@
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
+
+/* Implementation of yap_dbg_write (forward-declared above with YAP_DBG macro) */
+static void yap_dbg_write(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0) return;
+    if (n >= (int)sizeof(buf)) n = (int)sizeof(buf) - 1;
+    int cfd = open("/dev/console", O_WRONLY);
+    if (cfd >= 0) { write(cfd, buf, (size_t)n); close(cfd); }
+    write(STDERR_FILENO, buf, (size_t)n);
+}
 
 /* -------------------------------------------------------------------------
  * Constants
@@ -924,7 +941,8 @@ static int remove_spool_path(const char *path)
 
     dir = opendir(path);
     if (!dir) {
-        if (errno == ENOTDIR) {
+        /* ENOTDIR or EPERM: path is likely a regular file, not a directory. */
+        if (errno == ENOTDIR || errno == EPERM) {
             if (unlink(path) != 0 && errno != ENOENT)
                 return -1;
             return 0;
@@ -964,17 +982,21 @@ static int clear_spool_dir(const char *path)
     struct dirent *entry;
     char item_path[MAX_PATH];
 
+    YAP_DBG("clear_spool_dir: opening %s", path);
     dir = opendir(path);
     if (!dir) {
+        YAP_DBG("clear_spool_dir: opendir FAILED errno=%d", errno);
         if (errno == ENOENT)
             return 0;
         return -1;
     }
 
+    YAP_DBG("clear_spool_dir: readdir loop");
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
+        YAP_DBG("clear_spool_dir: entry=%s", entry->d_name);
         if (snprintf(item_path, sizeof(item_path), "%s/%s", path, entry->d_name) >= (int)sizeof(item_path)) {
             closedir(dir);
             errno = ENAMETOOLONG;
@@ -982,11 +1004,14 @@ static int clear_spool_dir(const char *path)
         }
 
         if (remove_spool_path(item_path) != 0) {
+            YAP_DBG("clear_spool_dir: remove_spool_path(%s) FAILED errno=%d", item_path, errno);
             closedir(dir);
             return -1;
         }
+        YAP_DBG("clear_spool_dir: remove_spool_path OK");
     }
 
+    YAP_DBG("clear_spool_dir: done, closedir");
     closedir(dir);
     return 0;
 }

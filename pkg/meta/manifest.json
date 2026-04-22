@@ -6,9 +6,20 @@
   "depends": [],
   "recommends": [],
   "conflicts": [],
-  "provides": ["syslog"],
+  "provides": [],
   "maintainer": "BlueyOS Maintainers <maintainers@blueyos.example>",
   "homepage": "https://github.com/nzmacgeek/yap",
-  "files": [],
-  "scripts": {}
+  "files": [
+    {"path": "/sbin/yap-rotate", "hash": "6dbbc316380efc0c168f89d23734f15d55bddcad248dd14bb5dfbab4b9f8c165", "size": 97276, "mode": "0755", "type": "file"},
+    {"path": "/sbin/yap", "hash": "cf230de2ef7eedb23d7addb8f6ce8b00e48edb912726de83a2326b1cbfa2153f", "size": 99884, "mode": "0755", "type": "file"},
+    {"path": "/etc/claw/services.d/yap-rotate.service.yml", "hash": "3ce718344d24768231310a5584e641214862c5c73a1f6d0d65d9c23f1fa4649f", "size": 502, "mode": "0644", "type": "file"},
+    {"path": "/etc/claw/services.d/yap.service.yml", "hash": "127f488ee38978999604846fb3fc5b53d62a6c0421f828ca8eac2e2762a1e40d", "size": 467, "mode": "0644", "type": "file"},
+    {"path": "/etc/yap.yml", "hash": "3651ea65803ec54ebdd2faab92ad76b9989f791bcc0cf335d2da9d4180127c6d", "size": 964, "mode": "0644", "type": "file"}
+  ],
+  "scripts": {
+    "preinst": "#!/bin/bash\n# Pre-installation script for yap\n# Called before files are placed.\nset -e\n\n# Create the syslog user/group if they do not exist\nif ! getent group syslog >/dev/null 2>&1; then\n    groupadd -r syslog 2>/dev/null || true\nfi\n\nif ! getent passwd syslog >/dev/null 2>&1; then\n    useradd -r -g syslog -s /sbin/nologin \\\n        -d /var/log -c \"yap syslog daemon\" syslog 2>/dev/null || true\nfi\n\n# Ensure log directory exists\nmkdir -p /var/log\nchmod 0755 /var/log\n\n# Ensure /var/run exists for the PID file\nmkdir -p /var/run\n\nexit 0\n",
+    "postinst": "#!/bin/bash\n# Post-installation script for yap\n# Called after files are placed.\nset -e\n\necho \"yap installed — Let me tell you about my day!\"\necho \"Claw service units are in /etc/claw/services.d/.\"\necho \"\"\necho \"  yap starts as part of claw-basic.target.\"\necho \"  yap-rotate runs as a claw timer service to rotate /var/log/system.log.\"\necho \"\"\necho \"  Configuration: /etc/yap.yml\"\necho \"  Log output:    /var/log/system.log\"\necho \"\"\n\nexit 0\n",
+    "prerm": "#!/bin/bash\n# Pre-removal script for yap\n# Called before files are removed.\nset -e\n\n# Stop yap if claw is running\nif command -v clawctl >/dev/null 2>&1; then\n    clawctl stop yap-rotate 2>/dev/null || true\n    clawctl stop yap        2>/dev/null || true\nfi\n\nexit 0\n",
+    "postrm": "#!/bin/bash\n# Post-removal script for yap\n# Called after files are removed.\nset -e\n\necho \"yap removed — That was a big day, wasn't it!\"\nexit 0\n"
+  }
 }
