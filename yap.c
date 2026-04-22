@@ -1,6 +1,10 @@
 /* Feature-test macros — must appear before any system headers */
 #define _POSIX_C_SOURCE 200809L
 
+/* Compile-time debug tracing — always on for BlueyOS diagnostic builds */
+#define YAP_DBG(fmt, ...) \
+    fprintf(stderr, "[yap dbg %s:%d] " fmt "\n", __FILE__, __LINE__, ##__VA_ARGS__)
+
 /*
  * yap - syslog daemon for BlueyOS
  * "Let me tell you about my day!" - Bluey Heeler
@@ -651,6 +655,8 @@ static int open_log_file(const char *path)
     int fd;
     struct stat st;
 
+    YAP_DBG("open_log_file: path=%s", path);
+
     /* Ensure parent directory exists */
     char dir[MAX_PATH];
     strncpy(dir, path, sizeof(dir) - 1);
@@ -658,20 +664,31 @@ static int open_log_file(const char *path)
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
         *slash = '\0';
+        YAP_DBG("open_log_file: checking parent dir=%s", dir);
         if (stat(dir, &st) != 0) {
+            YAP_DBG("open_log_file: parent missing, mkdir(%s)", dir);
             if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
                 fprintf(stderr, "yap: cannot create log directory %s: %s\n", dir, strerror(errno));
+                YAP_DBG("open_log_file: mkdir FAILED errno=%d (%s)", errno, strerror(errno));
                 return -1;
             }
+            YAP_DBG("open_log_file: mkdir OK");
         } else if (!S_ISDIR(st.st_mode)) {
             fprintf(stderr, "yap: log parent %s exists but is not a directory\n", dir);
+            YAP_DBG("open_log_file: parent not a directory");
             return -1;
+        } else {
+            YAP_DBG("open_log_file: parent dir exists");
         }
     }
 
+    YAP_DBG("open_log_file: calling open(%s)", path);
     fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0640);
     if (fd < 0) {
         fprintf(stderr, "yap: cannot open log file %s: %s\n", path, strerror(errno));
+        YAP_DBG("open_log_file: open FAILED fd=%d errno=%d (%s)", fd, errno, strerror(errno));
+    } else {
+        YAP_DBG("open_log_file: open OK fd=%d", fd);
     }
     return fd;
 }
@@ -682,6 +699,8 @@ static int mkdir_p(const char *path, mode_t mode)
     char tmp[MAX_PATH];
     char *p;
     struct stat st;
+
+    YAP_DBG("mkdir_p: path=%s", path);
 
     if (!path || path[0] == '\0') {
         errno = EINVAL;
@@ -699,22 +718,31 @@ static int mkdir_p(const char *path, mode_t mode)
             continue;
 
         *p = '\0';
-        if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+        YAP_DBG("mkdir_p: component=%s", tmp);
+        if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+            YAP_DBG("mkdir_p: mkdir(%s) FAILED errno=%d (%s)", tmp, errno, strerror(errno));
             return -1;
+        }
         if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            YAP_DBG("mkdir_p: stat(%s) not a dir errno=%d", tmp, errno);
             errno = ENOTDIR;
             return -1;
         }
         *p = '/';
     }
 
-    if (mkdir(tmp, mode) != 0 && errno != EEXIST)
+    YAP_DBG("mkdir_p: final mkdir(%s)", tmp);
+    if (mkdir(tmp, mode) != 0 && errno != EEXIST) {
+        YAP_DBG("mkdir_p: final mkdir FAILED errno=%d (%s)", errno, strerror(errno));
         return -1;
+    }
     if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        YAP_DBG("mkdir_p: final stat not a dir errno=%d", errno);
         errno = ENOTDIR;
         return -1;
     }
 
+    YAP_DBG("mkdir_p: OK");
     return 0;
 }
 
@@ -967,35 +995,53 @@ static int setup_local_input(const char *path)
 {
     struct stat st;
 
+    YAP_DBG("setup_local_input: path=%s", path);
+
     if (ensure_parent_dir(path, 0755) != 0) {
         fprintf(stderr, "yap: cannot create spool parent for %s: %s\n", path, strerror(errno));
+        YAP_DBG("setup_local_input: ensure_parent_dir FAILED errno=%d", errno);
         return -1;
     }
+    YAP_DBG("setup_local_input: ensure_parent_dir OK");
 
     if (stat(path, &st) == 0) {
+        YAP_DBG("setup_local_input: path exists, is_dir=%d", S_ISDIR(st.st_mode));
         if (!S_ISDIR(st.st_mode)) {
             if (unlink(path) != 0) {
                 fprintf(stderr, "yap: unlink(%s): %s\n", path, strerror(errno));
+                YAP_DBG("setup_local_input: unlink FAILED errno=%d", errno);
                 return -1;
             }
+            YAP_DBG("setup_local_input: unlink OK");
         } else if (clear_spool_dir(path) != 0) {
             fprintf(stderr, "yap: clear spool %s: %s\n", path, strerror(errno));
+            YAP_DBG("setup_local_input: clear_spool_dir FAILED errno=%d", errno);
             return -1;
+        } else {
+            YAP_DBG("setup_local_input: clear_spool_dir OK");
         }
     } else if (errno != ENOENT) {
         fprintf(stderr, "yap: stat(%s): %s\n", path, strerror(errno));
+        YAP_DBG("setup_local_input: stat FAILED unexpected errno=%d", errno);
         return -1;
+    } else {
+        YAP_DBG("setup_local_input: path does not exist yet (ENOENT), will mkdir");
     }
 
+    YAP_DBG("setup_local_input: calling mkdir(%s)", path);
     if (mkdir(path, YAP_COMPAT_SPOOL_MODE) != 0 && errno != EEXIST) {
         fprintf(stderr, "yap: mkdir(%s): %s\n", path, strerror(errno));
+        YAP_DBG("setup_local_input: mkdir FAILED errno=%d (%s)", errno, strerror(errno));
         return -1;
     }
+    YAP_DBG("setup_local_input: mkdir OK");
 
     if (chmod(path, YAP_COMPAT_SPOOL_MODE) != 0) {
         fprintf(stderr, "yap: chmod(%s): %s\n", path, strerror(errno));
+        YAP_DBG("setup_local_input: chmod FAILED errno=%d (%s)", errno, strerror(errno));
         return -1;
     }
+    YAP_DBG("setup_local_input: chmod OK");
 
     return YAP_COMPAT_SUCCESS;
 }
@@ -1564,6 +1610,8 @@ int main(int argc, char *argv[])
     const char *config_path = YAP_CONFIG;
     int opt;
 
+    YAP_DBG("main: yap starting, argc=%d", argc);
+
     /* Parse arguments */
     while ((opt = getopt(argc, argv, "nc:h")) != -1) {
         switch (opt) {
@@ -1587,26 +1635,36 @@ int main(int argc, char *argv[])
         strncpy(g_hostname, "blueyos", sizeof(g_hostname) - 1);
         g_hostname[sizeof(g_hostname) - 1] = '\0';
     }
+    YAP_DBG("startup: hostname=%s", g_hostname);
 
     /* Load configuration */
+    YAP_DBG("startup: loading config from %s", config_path);
     if (config_load(config_path, &g_cfg) < 0) {
         fprintf(stderr, "yap: failed to load config %s, using defaults\n", config_path);
+        YAP_DBG("startup: config load failed, using defaults");
         config_defaults(&g_cfg);
     }
+    YAP_DBG("startup: log_file=%s socket_path=%s", g_cfg.log_file, g_cfg.socket_path);
 
     /* Open log file before daemonizing so errors go to stderr */
+    YAP_DBG("startup: opening log file");
     g_log_fd = open_log_file(g_cfg.log_file);
     if (g_log_fd < 0) {
         fprintf(stderr, "yap: cannot open log file %s — aborting\n", g_cfg.log_file);
+        YAP_DBG("startup: open_log_file FAILED, aborting");
         return EXIT_FAILURE;
     }
+    YAP_DBG("startup: log file open OK fd=%d", g_log_fd);
 
     /* Set up local input */
+    YAP_DBG("startup: setting up local input");
     g_unix_fd = setup_local_input(g_cfg.socket_path);
     if (g_unix_fd < 0) {
         fprintf(stderr, "yap: cannot set up %s — aborting\n", g_cfg.socket_path);
+        YAP_DBG("startup: setup_local_input FAILED, aborting");
         return EXIT_FAILURE;
     }
+    YAP_DBG("startup: local input OK fd=%d", g_unix_fd);
 
     /* Set up UDP socket if requested */
     if (g_cfg.listen_udp) {
