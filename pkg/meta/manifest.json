@@ -11,7 +11,7 @@
   "homepage": "https://github.com/nzmacgeek/yap",
   "files": [
     {"path": "/sbin/yap-rotate", "hash": "6dbbc316380efc0c168f89d23734f15d55bddcad248dd14bb5dfbab4b9f8c165", "size": 97276, "mode": "0755", "type": "file"},
-    {"path": "/sbin/yap", "hash": "cf230de2ef7eedb23d7addb8f6ce8b00e48edb912726de83a2326b1cbfa2153f", "size": 99884, "mode": "0755", "type": "file"},
+    {"path": "/sbin/yap", "hash": "36ee274aa64bef86890dc19625dbc05b950e36d02a7a67d98c51c030a2af0719", "size": 104008, "mode": "0755", "type": "file"},
     {"path": "/etc/claw/services.d/yap-rotate.service.yml", "hash": "3ce718344d24768231310a5584e641214862c5c73a1f6d0d65d9c23f1fa4649f", "size": 502, "mode": "0644", "type": "file"},
     {"path": "/etc/claw/services.d/yap.service.yml", "hash": "127f488ee38978999604846fb3fc5b53d62a6c0421f828ca8eac2e2762a1e40d", "size": 467, "mode": "0644", "type": "file"},
     {"path": "/etc/yap.yml", "hash": "3651ea65803ec54ebdd2faab92ad76b9989f791bcc0cf335d2da9d4180127c6d", "size": 964, "mode": "0644", "type": "file"}
